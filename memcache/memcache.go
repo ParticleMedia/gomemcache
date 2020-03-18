@@ -144,6 +144,8 @@ type Client struct {
 	// be set to a number higher than your peak parallel requests.
 	MaxIdleConns int
 
+	IdleTimeout time.Duration
+
 	selector ServerSelector
 
 	lk       sync.Mutex
@@ -177,6 +179,7 @@ type conn struct {
 	rw   *bufio.ReadWriter
 	addr net.Addr
 	c    *Client
+	ts   time.Time
 }
 
 // release returns this connection back to the client's free pool
@@ -211,6 +214,7 @@ func (c *Client) putFreeConn(addr net.Addr, cn *conn) {
 		cn.nc.Close()
 		return
 	}
+	cn.ts = time.Now()
 	c.freeconn[addr.String()] = append(freelist, cn)
 }
 
@@ -224,6 +228,19 @@ func (c *Client) getFreeConn(addr net.Addr) (cn *conn, ok bool) {
 	if !ok || len(freelist) == 0 {
 		return nil, false
 	}
+
+	if c.IdleTimeout > 0 {
+		i := 0
+		for ; i < len(freelist) && freelist[i].ts.Add(c.IdleTimeout).Before(time.Now()); i++ {
+			freelist[i].nc.Close()
+		}
+		if i == len(freelist) {
+			c.freeconn[addr.String()] = nil
+			return nil, false
+		}
+		freelist = freelist[i:]
+	}
+
 	cn = freelist[len(freelist)-1]
 	c.freeconn[addr.String()] = freelist[:len(freelist)-1]
 	return cn, true
@@ -287,6 +304,7 @@ func (c *Client) getConn(addr net.Addr) (*conn, error) {
 		addr: addr,
 		rw:   bufio.NewReadWriter(bufio.NewReader(nc), bufio.NewWriter(nc)),
 		c:    c,
+		ts:   time.Now(),
 	}
 	cn.extendDeadline()
 	return cn, nil
